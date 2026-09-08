@@ -26,6 +26,7 @@ generating a report.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -166,6 +167,11 @@ def is_content_file(filename: str) -> bool:
     )
 
 
+def _diff_anchor(filename: str) -> str:
+    """GitHub anchors per-file diffs on a commit page as #diff-<sha256(path)[:32]>."""
+    return hashlib.sha256(filename.encode()).hexdigest()[:32]
+
+
 def format_diff(commit: dict) -> str:
     parts = []
     for f in commit.get("files", []):
@@ -184,10 +190,10 @@ def format_diff(commit: dict) -> str:
 def find_or_create_digest_issue(day: str) -> int:
     """Return the digest issue for the given day (YYYY-MM-DD), creating it.
 
-    One issue per day with changes: "NRP-CZ/docs documentation changes – YYYY-MM-DD".
+    One issue per day with changes: "CESNET Invenio docs changes – YYYY-MM-DD".
     Days without changes produce no issue at all.
     """
-    title = f"📖 NRP-CZ/docs documentation changes – {day}"
+    title = f"📖 CESNET Invenio docs changes – {day}"
 
     issues = gh_api(
         f"/repos/{DIGEST_REPO}/issues?state=open&labels={DIGEST_LABEL}&per_page=50"
@@ -304,6 +310,10 @@ def main() -> int:
 
         urls = sorted({u for f in content_files if (u := doc_url(f))})
         links_md = "\n".join(f"- 📄 {u}" for u in urls)
+        diffs_md = " · ".join(
+            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/commit/{sha}#diff-{_diff_anchor(f)})"
+            for f in content_files
+        )
 
         if day not in issue_numbers:
             issue_numbers[day] = find_or_create_digest_issue(day)
@@ -313,7 +323,9 @@ def main() -> int:
             f"### [{message}](https://github.com/{WATCH_REPO}/commit/{sha})\n"
             f"`{sha[:7]}` · {author} · {date[11:16]} UTC\n\n"
             f"{summary}\n\n"
-            f"**Published pages:**\n{links_md}"
+            f"**Published pages:**\n{links_md}\n\n"
+            f"<sub>Diffs: {diffs_md} · "
+            f"[whole commit](https://github.com/{WATCH_REPO}/commit/{sha})</sub>"
         )
         post_comment(issue_number, body)
         print(f"  {sha[:7]} – posted to issue #{issue_number} ({day})")

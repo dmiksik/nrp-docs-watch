@@ -19,7 +19,7 @@ každé změně přidává přímé odkazy na zasažené stránky publikované d
    issue daného dne.
 
 **Denní digesty:** pro každý den, ve kterém došlo ke změně, vzniká jedno issue
-(„NRP-CZ/docs documentation changes – YYYY-MM-DD") a všechny commity toho dne
+(„CESNET Invenio docs changes – YYYY-MM-DD") a všechny commity toho dne
 do něj přibývají jako komentáře. Den bez změn = žádné issue. Seznam digestů:
 [Issues](../../issues?q=label%3Adocs-digest).
 
