@@ -48,3 +48,14 @@ python watch_docs.py          # normální běh
 ```
 
 Bez závislostí — jen Python 3.10+ standardní knihovna.
+
+## Backfill (zpracování historie)
+
+Chceš zpracovat starší commity najednou? V záložce **Actions → Watch NRP-CZ/docs
+→ Run workflow** vyplň `since` (např. `2026-08-08`) a `max_commits` (např.
+`50`). Skript ignoruje uložený stav a zpracuje všechny commity od zadaného
+data. Lokálně totéž přes env proměnné:
+
+```bash
+SINCE_DATE=2026-08-08 MAX_COMMITS_PER_RUN=50 python watch_docs.py
+```

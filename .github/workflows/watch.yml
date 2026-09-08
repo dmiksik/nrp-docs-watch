@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: "17 * * * *"   # every hour at :17
   workflow_dispatch:        # manual run from the Actions tab
+    inputs:
+      since:
+        description: "Backfill: zpracuj commity od data (YYYY-MM-DD), ignoruj uložený stav"
+        required: false
+        type: string
+      max_commits:
+        description: "Max. počet commitů na běh (výchozí 10)"
+        required: false
+        type: string
+        default: "10"
 
 permissions:
   issues: write             # post digest comments
@@ -28,6 +38,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           E_INFRA_API_TOKEN: ${{ secrets.E_INFRA_API_TOKEN }}
           E_INFRA_MODEL: ${{ vars.E_INFRA_MODEL || 'kimi-k3' }}
+          SINCE_DATE: ${{ inputs.since || '' }}
+          MAX_COMMITS_PER_RUN: ${{ inputs.max_commits || '10' }}
         run: python watch_docs.py
 
       - name: Commit updated state

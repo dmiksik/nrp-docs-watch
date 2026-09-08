@@ -53,7 +53,7 @@ GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 STATE_FILE = Path(__file__).parent / "state.json"
 
 MAX_DIFF_CHARS = 12_000  # per commit, to keep prompts small
-MAX_COMMITS_PER_RUN = 10
+MAX_COMMITS_PER_RUN = int(os.environ.get("MAX_COMMITS_PER_RUN", "10"))
 
 PROMPT_TEMPLATE = """\
 Jsi asistent, který sleduje vývoj české dokumentace "CESNET Invenio" \
@@ -211,9 +211,11 @@ def post_comment(issue_number: int, body: str) -> None:
 # ------------------------------------------------------------------ main
 
 def collect_new_commits(since_sha: str | None) -> list[dict]:
-    commits = gh_api(
-        f"/repos/{WATCH_REPO}/commits?sha={WATCH_BRANCH}&path={WATCH_PATH}&per_page=50"
-    )
+    url = f"/repos/{WATCH_REPO}/commits?sha={WATCH_BRANCH}&path={WATCH_PATH}&per_page=100"
+    since_date = os.environ.get("SINCE_DATE")  # ISO date, e.g. 2026-08-08
+    if since_date:
+        url += f"&since={since_date}T00:00:00Z"
+    commits = gh_api(url)
     fresh = []
     for c in commits:
         if c["sha"] == since_sha:
@@ -245,7 +247,8 @@ def main() -> int:
         print(f"Initialized state at {WATCH_REPO}@{head_sha[:7]}")
         return 0
 
-    if since_sha == head_sha:
+    # Backfill mode: SINCE_DATE set -> ignore stored state, process by date
+    if not os.environ.get("SINCE_DATE") and since_sha == head_sha:
         print("No new commits.")
         return 0
 
