@@ -1,10 +1,10 @@
 # nrp-docs-watch
 
 Sleduje změny dokumentace v [`NRP-CZ/docs`](https://github.com/NRP-CZ/docs)
-(adresář `content/`) a jednou za hodinu o nich píše česky formulované shrnutí
-jako komentáře do digest issue v tomto repozitáři. Shrnutí generuje LLM na
-e-INFRA (`llm.ai.e-infra.cz`) z commit message a diffu; ke každé změně přidává
-přímé odkazy na zasažené stránky publikované dokumentace
+(adresář `content/`) a jednou za hodinu o nich píše anglicky formulovaná
+shrnutí jako komentáře do denních digest issues v tomto repozitáři. Shrnutí
+generuje LLM na e-INFRA (`llm.ai.e-infra.cz`) z commit message a diffu; ke
+každé změně přidává přímé odkazy na zasažené stránky publikované dokumentace
 <https://nrp-cz.github.io/docs/>.
 
 ## Jak to funguje
@@ -19,8 +19,8 @@ přímé odkazy na zasažené stránky publikované dokumentace
    issue daného dne.
 
 **Denní digesty:** pro každý den, ve kterém došlo ke změně, vzniká jedno issue
-(„Změny dokumentace NRP-CZ/docs – YYYY-MM-DD") a všechny commity toho dne do
-něj přibývají jako komentáře. Den bez změn = žádné issue. Seznam digestů:
+(„NRP-CZ/docs documentation changes – YYYY-MM-DD") a všechny commity toho dne
+do něj přibývají jako komentáře. Den bez změn = žádné issue. Seznam digestů:
 [Issues](../../issues?q=label%3Adocs-digest).
 
 **Notifikace:** u digest issue klikni na **Subscribe** → GitHub ti pošle mail
