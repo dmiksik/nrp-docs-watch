@@ -216,7 +216,10 @@ def collect_new_commits(since_sha: str | None) -> list[dict]:
     url = f"/repos/{WATCH_REPO}/commits?sha={WATCH_BRANCH}&path={WATCH_PATH}&per_page=100"
     since_date = os.environ.get("SINCE_DATE")  # ISO date, e.g. 2026-08-08
     if since_date:
-        url += f"&since={since_date}T00:00:00Z"
+        # backfill mode: date filter only, ignore stored state entirely
+        commits = gh_api(url + f"&since={since_date}T00:00:00Z")
+        commits.reverse()  # oldest first
+        return commits[:MAX_COMMITS_PER_RUN]
     commits = gh_api(url)
     fresh = []
     for c in commits:
