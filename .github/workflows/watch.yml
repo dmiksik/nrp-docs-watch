@@ -1,0 +1,43 @@
+name: Watch NRP-CZ/docs
+
+on:
+  schedule:
+    - cron: "17 * * * *"   # every hour at :17
+  workflow_dispatch:        # manual run from the Actions tab
+
+permissions:
+  issues: write             # post digest comments
+  contents: write           # commit updated state.json
+
+concurrency:
+  group: docs-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for documentation changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          E_INFRA_API_TOKEN: ${{ secrets.E_INFRA_API_TOKEN }}
+          E_INFRA_MODEL: ${{ vars.E_INFRA_MODEL || 'kimi-k3' }}
+        run: python watch_docs.py
+
+      - name: Commit updated state
+        run: |
+          if git diff --quiet state.json 2>/dev/null; then
+            echo "state.json unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: update watch state [skip ci]"
+          git push
