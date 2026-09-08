@@ -16,7 +16,12 @@ přímé odkazy na zasažené stránky publikované dokumentace
 3. Pro každý nový commit, který mění `.md`/`.mdx` soubory, zavolá LLM na
    e-INFRA a nechá si vygenerovat krátké české shrnutí pro čtenáře dokumentace.
 4. Shrnutí + odkazy na publikované stránky přibydou jako komentář v digest
-   issue (vytvoří se automaticky s labelem `docs-digest`).
+   issue daného dne.
+
+**Denní digesty:** pro každý den, ve kterém došlo ke změně, vzniká jedno issue
+(„Změny dokumentace NRP-CZ/docs – YYYY-MM-DD") a všechny commity toho dne do
+něj přibývají jako komentáře. Den bez změn = žádné issue. Seznam digestů:
+[Issues](../../issues?q=label%3Adocs-digest).
 
 **Notifikace:** u digest issue klikni na **Subscribe** → GitHub ti pošle mail
 při každém novém komentáři. Nebo sleduj celé repo (Watch → Custom → Issues).
@@ -36,7 +41,6 @@ při každém novém komentáři. Nebo sleduj celé repo (Watch → Custom → I
 | `WATCH_BRANCH` | `main` | sledovaná větev |
 | `WATCH_PATH` | `content` | sledovaný adresář |
 | `E_INFRA_MODEL` | `kimi-k3` | model na llm.ai.e-infra.cz |
-| `DIGEST_ISSUE` | _(auto)_ | pevné číslo issue pro digest |
 
 ## Lokální běh
 

@@ -170,33 +170,35 @@ def format_diff(commit: dict) -> str:
 
 # ------------------------------------------------------------------ digest issue
 
-def find_or_create_digest_issue() -> int:
-    fixed = os.environ.get("DIGEST_ISSUE")
-    if fixed:
-        return int(fixed)
+def find_or_create_digest_issue(day: str) -> int:
+    """Return the digest issue for the given day (YYYY-MM-DD), creating it.
+
+    One issue per day with changes: "Změny dokumentace NRP-CZ/docs – YYYY-MM-DD".
+    Days without changes produce no issue at all.
+    """
+    title = f"📖 Změny dokumentace NRP-CZ/docs – {day}"
+
     issues = gh_api(
-        f"/repos/{DIGEST_REPO}/issues?state=open&labels={DIGEST_LABEL}&per_page=10"
+        f"/repos/{DIGEST_REPO}/issues?state=open&labels={DIGEST_LABEL}&per_page=50"
     )
     for issue in issues:
-        if "pull_request" not in issue:
+        if "pull_request" not in issue and issue["title"] == title:
             return issue["number"]
+
+    body = (
+        f"Shrnutí změn v adresáři "
+        f"[{WATCH_PATH}/](https://github.com/{WATCH_REPO}/tree/{WATCH_BRANCH}/{WATCH_PATH}) "
+        f"repozitáře [{WATCH_REPO}](https://github.com/{WATCH_REPO}) "
+        f"za den **{day}**.\n\n"
+        "Shrnutí generuje LLM na e-INFRA (llm.ai.e-infra.cz) z commitů a diffů; "
+        f"odkazy vedou na publikovanou dokumentaci: {DOCS_BASE}/"
+    )
     issue = gh_api(
         f"/repos/{DIGEST_REPO}/issues",
         method="POST",
-        payload={
-            "title": "📖 Přehled změn v dokumentaci NRP-CZ/docs",
-            "body": (
-                "Do tohoto issue automaticky přibývají shrnutí změn v adresáři "
-                f"[{WATCH_PATH}/](https://github.com/{WATCH_REPO}/tree/{WATCH_BRANCH}/{WATCH_PATH}) "
-                f"repozitáře [{WATCH_REPO}](https://github.com/{WATCH_REPO}).\n\n"
-                "Shrnutí generuje LLM na e-INFRA (llm.ai.e-infra.cz) z commitů a diffů; "
-                f"odkazy vedou na publikovanou dokumentaci: {DOCS_BASE}/\n\n"
-                "Chceš dostávat notifikace o každé změně? Klikni vpravo na **Subscribe**."
-            ),
-            "labels": [DIGEST_LABEL],
-        },
+        payload={"title": title, "body": body, "labels": [DIGEST_LABEL]},
     )
-    print(f"Created digest issue #{issue['number']} in {DIGEST_REPO}")
+    print(f"Created digest issue #{issue['number']} ({day}) in {DIGEST_REPO}")
     return issue["number"]
 
 
@@ -263,7 +265,7 @@ def main() -> int:
         return 0
 
     print(f"{len(fresh)} new commit(s) touching {WATCH_PATH}/")
-    issue_number = find_or_create_digest_issue()
+    issue_numbers: dict[str, int] = {}  # day -> issue number (lazy)
 
     for c in fresh:
         sha = c["sha"]
@@ -271,6 +273,7 @@ def main() -> int:
         message = detail["commit"]["message"].splitlines()[0]
         author = detail["commit"]["author"]["name"]
         date = detail["commit"]["author"]["date"]
+        day = date[:10]
         files = detail.get("files", [])
 
         content_files = [f["filename"] for f in files if is_content_file(f["filename"])]
@@ -288,14 +291,18 @@ def main() -> int:
         urls = sorted({u for f in content_files if (u := doc_url(f))})
         links_md = "\n".join(f"- 📄 {u}" for u in urls)
 
+        if day not in issue_numbers:
+            issue_numbers[day] = find_or_create_digest_issue(day)
+        issue_number = issue_numbers[day]
+
         body = (
             f"### [{message}](https://github.com/{WATCH_REPO}/commit/{sha})\n"
-            f"`{sha[:7]}` · {author} · {date[:10]}\n\n"
+            f"`{sha[:7]}` · {author} · {date[11:16]} UTC\n\n"
             f"{summary}\n\n"
             f"**Publikované stránky:**\n{links_md}"
         )
         post_comment(issue_number, body)
-        print(f"  {sha[:7]} – posted to issue #{issue_number}")
+        print(f"  {sha[:7]} – posted to issue #{issue_number} ({day})")
 
     save_state({
         "last_sha": fresh[-1]["sha"],
