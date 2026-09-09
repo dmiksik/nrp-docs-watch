@@ -86,6 +86,31 @@ what is needed to understand the change.
 remarks.\
 """
 
+GROUP_PROMPT_TEMPLATE = """\
+You are an assistant tracking changes in the "CESNET Invenio" documentation \
+(repository {repo}, directory {path}/). Below are {count} changes to the docs \
+that all affect the same page(s). They were merged on the same day.
+
+{changes}
+
+Summarize the combined effect of all these changes in English for readers who \
+use the documentation but are not its authors. Follow these rules strictly:
+
+1. First line: `## <topic>` — a short human-readable name of the area the \
+changes affect (e.g. "Search", "FAQ", "Workflows"). Not a file name.
+2. Below it, bullet points (`-`), never continuous paragraphs.
+3. Each bullet = one distinct change/fact; typically 2–6 bullets.
+4. Be concise and factual — what changed or was added overall. No introductory \
+phrases like "The documentation now…" or "The page was extended…".
+5. Do NOT repeat the same fact for each change — merge overlapping changes \
+into one bullet. For large changes do NOT list everything — summarize in one \
+bullet plus a few representative examples ending with "etc.".
+6. Keep technical details (field names, keys, paths) in `backticks`, but only \
+what is needed to understand the change.
+7. Reply with the content only (heading + bullets), no opening or closing \
+remarks.\
+"""
+
 
 # ---------------------------------------------------------------- HTTP helpers
 
@@ -260,6 +285,24 @@ def collect_merged_prs(since_date: str | None) -> list[dict]:
     return merged
 
 
+def group_by_pages(items: list[dict]) -> list[list[dict]]:
+    """Group changes by identical set of published page URLs.
+
+    Items with the same set of doc URLs (e.g. all touching only
+    sensitive_data) are grouped together; items with different or partially
+    overlapping page sets stay separate. Order within a group is preserved.
+    """
+    groups: dict[frozenset, list[dict]] = {}
+    order: list[frozenset] = []
+    for it in items:
+        key = frozenset(it["urls"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(it)
+    return [groups[k] for k in order]
+
+
 def collect_direct_commits(since_sha: str | None, pr_sha_set: set[str]) -> list[dict]:
     """Commits on the branch touching WATCH_PATH that are not part of any PR.
 
@@ -347,91 +390,65 @@ def main() -> int:
     print(f"{total} change(s): {len(prs)} merged PR(s), {len(direct)} direct commit(s)")
     issue_numbers: dict[str, int] = {}  # day -> issue number (lazy)
 
-    # --- merged PRs ----------------------------------------------------------
+    # --- build a uniform list of changes -------------------------------------
+    changes: list[dict] = []
+
     for p in prs:
         number = p["number"]
-        title = p["title"]
-        author = p["user"]["login"]
-        date = p["merged_at"]
-        day = date[:10]
-        description = (p.get("body") or "").strip() or "(no description)"
         files = pr_files(number)
         content_files = content_files_of(files)
         if not content_files:
             print(f"  PR #{number} – no .md/.mdx changes, skipping LLM")
             continue
+        changes.append({
+            "kind": "pr",
+            "number": number,
+            "title": p["title"],
+            "author": p["user"]["login"],
+            "date": p["merged_at"],
+            "day": p["merged_at"][:10],
+            "description": (p.get("body") or "").strip() or "(no description)",
+            "files": files,
+            "content_files": content_files,
+            "urls": sorted({u for f in content_files if (u := doc_url(f))}),
+        })
 
-        prompt = PROMPT_TEMPLATE.format(
-            repo=WATCH_REPO, path=WATCH_PATH, title=title, author=author,
-            date=date, description=description, diff=format_diff(files),
-        )
-        print(f"  PR #{number} – summarizing ({len(content_files)} content file(s))…")
-        summary = llm_chat(prompt)
-
-        urls = sorted({u for f in content_files if (u := doc_url(f))})
-        links_md = "\n".join(f"- 📄 {u}" for u in urls)
-        diffs_md = " · ".join(
-            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/pull/{number}/files#diff-{_diff_anchor(f)})"
-            for f in content_files
-        )
-
-        if day not in issue_numbers:
-            issue_numbers[day] = find_or_create_digest_issue(day)
-        issue_number = issue_numbers[day]
-
-        body = (
-            f"### [PR #{number}: {title}](https://github.com/{WATCH_REPO}/pull/{number})\n"
-            f"by {author} · merged {date[:10]}\n\n"
-            f"{summary}\n\n"
-            f"**Published pages:**\n{links_md}\n\n"
-            f"<sub>Diffs: {diffs_md} · "
-            f"[whole PR](https://github.com/{WATCH_REPO}/pull/{number}/files)</sub>"
-        )
-        post_comment(issue_number, body)
-        print(f"  PR #{number} – posted to issue #{issue_number} ({day})")
-
-    # --- direct commits (fallback) -------------------------------------------
     for c in direct:
         sha = c["sha"]
         detail = gh_api(f"/repos/{WATCH_REPO}/commits/{sha}")
-        message = detail["commit"]["message"].splitlines()[0]
-        author = detail["commit"]["author"]["name"]
-        date = detail["commit"]["author"]["date"]
-        day = date[:10]
         files = detail.get("files", [])
         content_files = content_files_of(files)
         if not content_files:
             print(f"  {sha[:7]} – no .md/.mdx changes, skipping LLM")
             continue
+        changes.append({
+            "kind": "commit",
+            "sha": sha,
+            "title": detail["commit"]["message"].splitlines()[0],
+            "author": detail["commit"]["author"]["name"],
+            "date": detail["commit"]["author"]["date"],
+            "day": detail["commit"]["author"]["date"][:10],
+            "description": "(direct commit)",
+            "files": files,
+            "content_files": content_files,
+            "urls": sorted({u for f in content_files if (u := doc_url(f))}),
+        })
 
-        prompt = PROMPT_TEMPLATE.format(
-            repo=WATCH_REPO, path=WATCH_PATH, title=message, author=author,
-            date=date, description="(direct commit)", diff=format_diff(files),
-        )
-        print(f"  {sha[:7]} – summarizing ({len(content_files)} content file(s))…")
-        summary = llm_chat(prompt)
+    # --- group by day, then by identical page set ----------------------------
+    by_day: dict[str, list[dict]] = {}
+    for ch in changes:
+        by_day.setdefault(ch["day"], []).append(ch)
 
-        urls = sorted({u for f in content_files if (u := doc_url(f))})
-        links_md = "\n".join(f"- 📄 {u}" for u in urls)
-        diffs_md = " · ".join(
-            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/commit/{sha}#diff-{_diff_anchor(f)})"
-            for f in content_files
-        )
+    for day in sorted(by_day):
+        for group in group_by_pages(by_day[day]):
+            if day not in issue_numbers:
+                issue_numbers[day] = find_or_create_digest_issue(day)
+            issue_number = issue_numbers[day]
 
-        if day not in issue_numbers:
-            issue_numbers[day] = find_or_create_digest_issue(day)
-        issue_number = issue_numbers[day]
-
-        body = (
-            f"### [{message}](https://github.com/{WATCH_REPO}/commit/{sha})\n"
-            f"`{sha[:7]}` · {author} · {date[11:16]} UTC\n\n"
-            f"{summary}\n\n"
-            f"**Published pages:**\n{links_md}\n\n"
-            f"<sub>Diffs: {diffs_md} · "
-            f"[whole commit](https://github.com/{WATCH_REPO}/commit/{sha})</sub>"
-        )
-        post_comment(issue_number, body)
-        print(f"  {sha[:7]} – posted to issue #{issue_number} ({day})")
+            if len(group) == 1:
+                _post_single(issue_number, group[0])
+            else:
+                _post_group(issue_number, group)
 
     save_state({
         "last_sha": head_sha,
@@ -439,6 +456,88 @@ def main() -> int:
     })
     print("Done.")
     return 0
+
+
+def _post_single(issue_number: int, ch: dict) -> None:
+    """Post one change as its own comment."""
+    prompt = PROMPT_TEMPLATE.format(
+        repo=WATCH_REPO, path=WATCH_PATH, title=ch["title"], author=ch["author"],
+        date=ch["date"], description=ch["description"], diff=format_diff(ch["files"]),
+    )
+    print(f"  {ch['kind']} {ch.get('number', ch.get('sha', '')[:7])} – summarizing…")
+    summary = llm_chat(prompt)
+
+    links_md = "\n".join(f"- 📄 {u}" for u in ch["urls"])
+    if ch["kind"] == "pr":
+        number = ch["number"]
+        diffs_md = " · ".join(
+            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/pull/{number}/files#diff-{_diff_anchor(f)})"
+            for f in ch["content_files"]
+        )
+        body = (
+            f"### [PR #{number}: {ch['title']}](https://github.com/{WATCH_REPO}/pull/{number})\n"
+            f"by {ch['author']} · merged {ch['date'][:10]}\n\n"
+            f"{summary}\n\n"
+            f"**Published pages:**\n{links_md}\n\n"
+            f"<sub>Diffs: {diffs_md} · "
+            f"[whole PR](https://github.com/{WATCH_REPO}/pull/{number}/files)</sub>"
+        )
+    else:
+        sha = ch["sha"]
+        diffs_md = " · ".join(
+            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/commit/{sha}#diff-{_diff_anchor(f)})"
+            for f in ch["content_files"]
+        )
+        body = (
+            f"### [{ch['title']}](https://github.com/{WATCH_REPO}/commit/{sha})\n"
+            f"`{sha[:7]}` · {ch['author']} · {ch['date'][11:16]} UTC\n\n"
+            f"{summary}\n\n"
+            f"**Published pages:**\n{links_md}\n\n"
+            f"<sub>Diffs: {diffs_md} · "
+            f"[whole commit](https://github.com/{WATCH_REPO}/commit/{sha})</sub>"
+        )
+    post_comment(issue_number, body)
+    print(f"  {ch['kind']} {ch.get('number', ch.get('sha', '')[:7])} – posted to issue #{issue_number}")
+
+
+def _post_group(issue_number: int, group: list[dict]) -> None:
+    """Post several changes touching the same page(s) as one combined comment."""
+    changes_block = []
+    for ch in group:
+        label = f"PR #{ch['number']}" if ch["kind"] == "pr" else ch["sha"][:7]
+        changes_block.append(
+            f"Change {label} — {ch['title']}\n"
+            f"Author: {ch['author']}\n"
+            f"Description: {ch['description']}\n"
+            f"Diff:\n{format_diff(ch['files'])}"
+        )
+    prompt = GROUP_PROMPT_TEMPLATE.format(
+        repo=WATCH_REPO, path=WATCH_PATH, count=len(group),
+        changes="\n\n".join(changes_block),
+    )
+    print(f"  group of {len(group)} changes ({group[0]['urls'][0]}) – summarizing…")
+    summary = llm_chat(prompt)
+
+    links_md = "\n".join(f"- 📄 {u}" for u in group[0]["urls"])
+
+    refs = []
+    for ch in group:
+        if ch["kind"] == "pr":
+            refs.append(f"[PR #{ch['number']}](https://github.com/{WATCH_REPO}/pull/{ch['number']})")
+        else:
+            refs.append(f"[`{ch['sha'][:7]}`](https://github.com/{WATCH_REPO}/commit/{ch['sha']})")
+    refs_md = " · ".join(refs)
+
+    authors = sorted({ch["author"] for ch in group})
+    body = (
+        f"### {group[0]['urls'][0].rsplit('/', 1)[-1]} — {len(group)} changes\n"
+        f"by {', '.join(authors)} · merged {group[0]['day']}\n\n"
+        f"{summary}\n\n"
+        f"**Published pages:**\n{links_md}\n\n"
+        f"<sub>Changes: {refs_md}</sub>"
+    )
+    post_comment(issue_number, body)
+    print(f"  group of {len(group)} changes – posted to issue #{issue_number}")
 
 
 if __name__ == "__main__":
