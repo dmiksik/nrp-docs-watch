@@ -132,13 +132,13 @@ def gh_api(path: str, method: str = "GET", payload: dict | None = None):
         raise RuntimeError(f"GitHub API {method} {url} -> {e.code}: {detail}") from e
 
 
-def llm_chat(prompt: str) -> str:
+def llm_chat(prompt: str, max_tokens: int = 400) -> str:
     """Call the e-INFRA LLM (OpenAI-compatible chat completions)."""
     payload = {
         "model": E_INFRA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 400,
+        "max_tokens": max_tokens,
     }
     req = urllib.request.Request(E_INFRA_URL, method="POST")
     req.add_header("Authorization", f"Bearer {E_INFRA_TOKEN}")
@@ -501,7 +501,11 @@ def _post_single(issue_number: int, ch: dict) -> None:
 
 
 def _post_group(issue_number: int, group: list[dict]) -> None:
-    """Post several changes touching the same page(s) as one combined comment."""
+    """Post several changes touching the same page(s) as one combined comment.
+
+    If the LLM returns an empty/too-short summary for the combined prompt, fall
+    back to posting each change individually so nothing is lost.
+    """
     changes_block = []
     for ch in group:
         label = f"PR #{ch['number']}" if ch["kind"] == "pr" else ch["sha"][:7]
@@ -516,7 +520,12 @@ def _post_group(issue_number: int, group: list[dict]) -> None:
         changes="\n\n".join(changes_block),
     )
     print(f"  group of {len(group)} changes ({group[0]['urls'][0]}) – summarizing…")
-    summary = llm_chat(prompt)
+    summary = llm_chat(prompt, max_tokens=800)
+    if len(summary.strip()) < 20:
+        print(f"  group summary empty ({len(summary.strip())} chars) – falling back to individual posts")
+        for ch in group:
+            _post_single(issue_number, ch)
+        return
 
     links_md = "\n".join(f"- 📄 {u}" for u in group[0]["urls"])
 
