@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Watch NRP-CZ/docs for content changes and summarize them with an e-INFRA LLM.
 
-Checks for new commits touching content/ since the last run (state is kept in
-state.json, committed back to this repo). For every new commit it fetches the
-changed files, asks an LLM at llm.ai.e-infra.cz for a Czech summary, maps the
-changed pages to their published URLs at https://nrp-cz.github.io/docs/ and
-posts the result as a comment on a digest issue in this repository.
+Hybrid PR-based watcher. It detects new merged pull requests that touch
+content/ (one comment per PR, using the PR title/body and the full PR diff)
+plus any direct commits to the watched branch that are not part of a PR
+(fallback, so nothing is missed). Each change is summarized in English by an
+LLM at llm.ai.e-infra.cz, mapped to its published URLs at
+https://nrp-cz.github.io/docs/ and posted as a comment on a daily digest issue
+in this repository.
 
 Configuration via environment variables:
   WATCH_REPO        owner/name of the watched repo   (default NRP-CZ/docs)
@@ -13,8 +15,6 @@ Configuration via environment variables:
   WATCH_PATH        path prefix to watch             (default content)
   DIGEST_REPO       owner/name of the repo holding the digest issue
                     (default: GITHUB_REPOSITORY, i.e. this repo)
-  DIGEST_ISSUE      fixed issue number to use        (default: newest open
-                    issue with the digest label, created if missing)
   E_INFRA_API_TOKEN token for llm.ai.e-infra.cz      (required)
   E_INFRA_MODEL     model name                       (default kimi-k3)
   GH_TOKEN / GITHUB_TOKEN  GitHub API token          (required)
@@ -53,17 +53,17 @@ E_INFRA_TOKEN = os.environ.get("E_INFRA_API_TOKEN", "")
 GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 STATE_FILE = Path(__file__).parent / "state.json"
 
-MAX_DIFF_CHARS = 12_000  # per commit, to keep prompts small
-MAX_COMMITS_PER_RUN = int(os.environ.get("MAX_COMMITS_PER_RUN", "10"))
+MAX_DIFF_CHARS = 12_000  # per change, to keep prompts small
+MAX_ITEMS_PER_RUN = int(os.environ.get("MAX_ITEMS_PER_RUN", "10"))
 
 PROMPT_TEMPLATE = """\
 You are an assistant tracking changes in the "CESNET Invenio" documentation \
-(repository {repo}, directory {path}/). Below is one commit that changes the docs.
+(repository {repo}, directory {path}/). Below is one change to the docs.
 
-Commit: {sha}
+Title: {title}
 Author: {author}
 Date: {date}
-Message: {message}
+Description: {description}
 
 Changed files and their diff (truncated):
 {diff}
@@ -172,17 +172,37 @@ def _diff_anchor(filename: str) -> str:
     return hashlib.sha256(filename.encode()).hexdigest()[:32]
 
 
-def format_diff(commit: dict) -> str:
+def format_diff(files: list[dict]) -> str:
     parts = []
-    for f in commit.get("files", []):
-        status = {"added": "přidán", "removed": "smazán", "modified": "změněn",
-                  "renamed": "přejmenován"}.get(f["status"], f["status"])
+    for f in files:
+        status = {"added": "added", "removed": "removed", "modified": "modified",
+                  "renamed": "renamed"}.get(f["status"], f["status"])
         parts.append(f"--- {f['filename']} ({status})")
         patch = f.get("patch")
         if patch:
             parts.append(patch)
     diff = "\n".join(parts)
-    return diff[:MAX_DIFF_CHARS] + ("\n… (zkráceno)" if len(diff) > MAX_DIFF_CHARS else "")
+    return diff[:MAX_DIFF_CHARS] + ("\n… (truncated)" if len(diff) > MAX_DIFF_CHARS else "")
+
+
+def content_files_of(files: list[dict]) -> list[str]:
+    return [f["filename"] for f in files if is_content_file(f["filename"])]
+
+
+def pr_commits(pr_number: int) -> list[str]:
+    """SHAs of the commits in a pull request."""
+    commits = gh_api(f"/repos/{WATCH_REPO}/pulls/{pr_number}/commits?per_page=100")
+    return [c["sha"] for c in commits]
+
+
+def pr_files(pr_number: int) -> list[dict]:
+    """Files changed by a pull request (with patches)."""
+    return gh_api(f"/repos/{WATCH_REPO}/pulls/{pr_number}/files?per_page=100")
+
+
+def commit_files(sha: str) -> list[dict]:
+    """Files changed by a single commit (with patches)."""
+    return gh_api(f"/repos/{WATCH_REPO}/commits/{sha}").get("files", [])
 
 
 # ------------------------------------------------------------------ digest issue
@@ -227,24 +247,48 @@ def post_comment(issue_number: int, body: str) -> None:
     )
 
 
-# ------------------------------------------------------------------ main
+# ------------------------------------------------------------------ collection
 
-def collect_new_commits(since_sha: str | None) -> list[dict]:
-    url = f"/repos/{WATCH_REPO}/commits?sha={WATCH_BRANCH}&path={WATCH_PATH}&per_page=100"
-    since_date = os.environ.get("SINCE_DATE")  # ISO date, e.g. 2026-08-08
+def collect_merged_prs(since_date: str | None) -> list[dict]:
+    """Merged PRs touching WATCH_PATH, oldest first (no cutoff)."""
+    url = f"/repos/{WATCH_REPO}/pulls?state=closed&base={WATCH_BRANCH}&sort=updated&direction=desc&per_page=100"
+    prs = gh_api(url)
+    merged = [p for p in prs if p.get("merged_at")]
     if since_date:
-        # backfill mode: date filter only, ignore stored state entirely
+        merged = [p for p in merged if p["merged_at"][:10] >= since_date]
+    merged.reverse()  # oldest first
+    return merged
+
+
+def collect_direct_commits(since_sha: str | None, pr_sha_set: set[str]) -> list[dict]:
+    """Commits on the branch touching WATCH_PATH that are not part of any PR.
+
+    Merge commits (e.g. "Merge pull request #N") are excluded — they are
+    already covered by the PR they merge. No cutoff here; the caller applies
+    the combined limit.
+    """
+    url = f"/repos/{WATCH_REPO}/commits?sha={WATCH_BRANCH}&path={WATCH_PATH}&per_page=100"
+    since_date = os.environ.get("SINCE_DATE")
+    if since_date:
         commits = gh_api(url + f"&since={since_date}T00:00:00Z")
-        commits.reverse()  # oldest first
-        return commits[:MAX_COMMITS_PER_RUN]
-    commits = gh_api(url)
-    fresh = []
+    else:
+        commits = gh_api(url)
+        fresh = []
+        for c in commits:
+            if c["sha"] == since_sha:
+                break
+            fresh.append(c)
+        commits = fresh
+    direct = []
     for c in commits:
-        if c["sha"] == since_sha:
-            break
-        fresh.append(c)
-    fresh.reverse()  # oldest first
-    return fresh[:MAX_COMMITS_PER_RUN]
+        if c["sha"] in pr_sha_set:
+            continue
+        msg = c["commit"]["message"]
+        if msg.startswith("Merge pull request") or msg.startswith("Merge branch"):
+            continue
+        direct.append(c)
+    direct.reverse()  # oldest first
+    return direct
 
 
 def main() -> int:
@@ -260,6 +304,7 @@ def main() -> int:
 
     state = load_state()
     since_sha = state.get("last_sha")
+    since_date = os.environ.get("SINCE_DATE")  # backfill mode
 
     head = gh_api(f"/repos/{WATCH_REPO}/commits/{WATCH_BRANCH}")
     head_sha = head["sha"]
@@ -269,25 +314,84 @@ def main() -> int:
         print(f"Initialized state at {WATCH_REPO}@{head_sha[:7]}")
         return 0
 
-    # Backfill mode: SINCE_DATE set -> ignore stored state, process by date
-    if not os.environ.get("SINCE_DATE") and since_sha == head_sha:
-        print("No new commits.")
+    if not since_date and since_sha == head_sha:
+        print("No new changes.")
         return 0
 
     if not E_INFRA_TOKEN:
         sys.exit("E_INFRA_API_TOKEN is not set")
 
-    fresh = collect_new_commits(since_sha)
-    if not fresh:
-        # state points at a commit no longer reachable (force push) – reset
-        save_state({"last_sha": head_sha, "updated": datetime.now(timezone.utc).isoformat()})
-        print("State reset to current HEAD (previous SHA not found in history).")
+    # --- collect merged PRs and direct commits -------------------------------
+    prs = collect_merged_prs(since_date)
+    pr_sha_set: set[str] = set()
+    for p in prs:
+        pr_sha_set.update(pr_commits(p["number"]))
+
+    direct = collect_direct_commits(since_sha, pr_sha_set)
+
+    # combined limit: keep the oldest MAX_ITEMS_PER_RUN changes overall
+    if len(prs) + len(direct) > MAX_ITEMS_PER_RUN:
+        # drop the newest (end of the oldest-first lists) to respect the limit
+        prs = prs[:MAX_ITEMS_PER_RUN]
+        direct = direct[:MAX_ITEMS_PER_RUN - len(prs)]
+
+    total = len(prs) + len(direct)
+    if total == 0:
+        if since_date:
+            print("No changes in the requested period.")
+        else:
+            save_state({"last_sha": head_sha, "updated": datetime.now(timezone.utc).isoformat()})
+            print("State reset to current HEAD (previous SHA not found in history).")
         return 0
 
-    print(f"{len(fresh)} new commit(s) touching {WATCH_PATH}/")
+    print(f"{total} change(s): {len(prs)} merged PR(s), {len(direct)} direct commit(s)")
     issue_numbers: dict[str, int] = {}  # day -> issue number (lazy)
 
-    for c in fresh:
+    # --- merged PRs ----------------------------------------------------------
+    for p in prs:
+        number = p["number"]
+        title = p["title"]
+        author = p["user"]["login"]
+        date = p["merged_at"]
+        day = date[:10]
+        description = (p.get("body") or "").strip() or "(no description)"
+        files = pr_files(number)
+        content_files = content_files_of(files)
+        if not content_files:
+            print(f"  PR #{number} – no .md/.mdx changes, skipping LLM")
+            continue
+
+        prompt = PROMPT_TEMPLATE.format(
+            repo=WATCH_REPO, path=WATCH_PATH, title=title, author=author,
+            date=date, description=description, diff=format_diff(files),
+        )
+        print(f"  PR #{number} – summarizing ({len(content_files)} content file(s))…")
+        summary = llm_chat(prompt)
+
+        urls = sorted({u for f in content_files if (u := doc_url(f))})
+        links_md = "\n".join(f"- 📄 {u}" for u in urls)
+        diffs_md = " · ".join(
+            f"[`{f.split('/')[-1]}`](https://github.com/{WATCH_REPO}/pull/{number}/files#diff-{_diff_anchor(f)})"
+            for f in content_files
+        )
+
+        if day not in issue_numbers:
+            issue_numbers[day] = find_or_create_digest_issue(day)
+        issue_number = issue_numbers[day]
+
+        body = (
+            f"### [PR #{number}: {title}](https://github.com/{WATCH_REPO}/pull/{number})\n"
+            f"by {author} · merged {date[:10]}\n\n"
+            f"{summary}\n\n"
+            f"**Published pages:**\n{links_md}\n\n"
+            f"<sub>Diffs: {diffs_md} · "
+            f"[whole PR](https://github.com/{WATCH_REPO}/pull/{number}/files)</sub>"
+        )
+        post_comment(issue_number, body)
+        print(f"  PR #{number} – posted to issue #{issue_number} ({day})")
+
+    # --- direct commits (fallback) -------------------------------------------
+    for c in direct:
         sha = c["sha"]
         detail = gh_api(f"/repos/{WATCH_REPO}/commits/{sha}")
         message = detail["commit"]["message"].splitlines()[0]
@@ -295,15 +399,14 @@ def main() -> int:
         date = detail["commit"]["author"]["date"]
         day = date[:10]
         files = detail.get("files", [])
-
-        content_files = [f["filename"] for f in files if is_content_file(f["filename"])]
+        content_files = content_files_of(files)
         if not content_files:
             print(f"  {sha[:7]} – no .md/.mdx changes, skipping LLM")
             continue
 
         prompt = PROMPT_TEMPLATE.format(
-            repo=WATCH_REPO, path=WATCH_PATH, sha=sha[:7], author=author,
-            date=date, message=message, diff=format_diff(detail),
+            repo=WATCH_REPO, path=WATCH_PATH, title=message, author=author,
+            date=date, description="(direct commit)", diff=format_diff(files),
         )
         print(f"  {sha[:7]} – summarizing ({len(content_files)} content file(s))…")
         summary = llm_chat(prompt)
@@ -331,7 +434,7 @@ def main() -> int:
         print(f"  {sha[:7]} – posted to issue #{issue_number} ({day})")
 
     save_state({
-        "last_sha": fresh[-1]["sha"],
+        "last_sha": head_sha,
         "updated": datetime.now(timezone.utc).isoformat(),
     })
     print("Done.")

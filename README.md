@@ -3,7 +3,7 @@
 Sleduje změny dokumentace v [`NRP-CZ/docs`](https://github.com/NRP-CZ/docs)
 (adresář `content/`) a jednou za hodinu o nich píše anglicky formulovaná
 shrnutí jako komentáře do denních digest issues v tomto repozitáři. Shrnutí
-generuje LLM na e-INFRA (`llm.ai.e-infra.cz`) z commit message a diffu; ke
+generuje LLM na e-INFRA (`llm.ai.e-infra.cz`) z titulku/popisu a diffu; ke
 každé změně přidává přímé odkazy na zasažené stránky publikované dokumentace
 <https://nrp-cz.github.io/docs/>.
 
@@ -11,11 +11,14 @@ každé změně přidává přímé odkazy na zasažené stránky publikované d
 
 1. GitHub Actions workflow (`.github/workflows/watch.yml`) běží každou hodinu
    (nebo ručně přes *Run workflow*).
-2. `watch_docs.py` se přes GitHub API zeptá na commity v `content/` od poslední
-   kontroly (stav je v `state.json`, commituje se zpět do repa).
-3. Pro každý nový commit, který mění `.md`/`.mdx` soubory, zavolá LLM na
-   e-INFRA a nechá si vygenerovat krátké české shrnutí pro čtenáře dokumentace.
-4. Shrnutí + odkazy na publikované stránky přibydou jako komentář v digest
+2. `watch_docs.py` se přes GitHub API zeptá na **sloučené pull requesty**, které
+   se dotýkají `content/` (stav je v `state.json`, commituje se zpět do repa).
+3. Pro každý PR, který mění `.md`/`.mdx` soubory, zavolá LLM na e-INFRA a nechá
+   si vygenerovat krátké anglické shrnutí pro čtenáře dokumentace — z titulku,
+   popisu a celého diffu PR.
+4. **Fallback:** přímé commity na `main`, které nepatří žádnému PR (někteří
+   autoři commitují rovnou), se zpracují stejně, aby nic neuniklo.
+5. Shrnutí + odkazy na publikované stránky přibydou jako komentář v digest
    issue daného dne.
 
 **Denní digesty:** pro každý den, ve kterém došlo ke změně, vzniká jedno issue
@@ -55,11 +58,11 @@ Bez závislostí — jen Python 3.10+ standardní knihovna.
 
 ## Backfill (zpracování historie)
 
-Chceš zpracovat starší commity najednou? V záložce **Actions → Watch NRP-CZ/docs
+Chceš zpracovat starší změny najednou? V záložce **Actions → Watch NRP-CZ/docs
 → Run workflow** vyplň `since` (např. `2026-08-08`) a `max_commits` (např.
-`50`). Skript ignoruje uložený stav a zpracuje všechny commity od zadaného
-data. Lokálně totéž přes env proměnné:
+`50`). Skript ignoruje uložený stav a zpracuje všechny sloučené PR a přímé
+commity od zadaného data. Lokálně totéž přes env proměnné:
 
 ```bash
-SINCE_DATE=2026-08-08 MAX_COMMITS_PER_RUN=50 python watch_docs.py
+SINCE_DATE=2026-08-08 MAX_ITEMS_PER_RUN=50 python watch_docs.py
 ```
